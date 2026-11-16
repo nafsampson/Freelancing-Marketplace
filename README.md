@@ -1,4 +1,5 @@
 # HustleHub+
+[![CI](https://github.com/nafsampson/Freelancing-Marketplace/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/nafsampson/Freelancing-Marketplace/actions/workflows/ci.yml)
 
 A freelance services marketplace built with React, Express and MongoDB. Clients discover services and book freelancers; freelancers manage gigs, respond to requests and track completed-work income. Administrators can view platform statistics, registered users and service listings.
 
