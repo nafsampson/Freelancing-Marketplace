@@ -1,8 +1,7 @@
-# HustleHub
+# HustleHub+
 
 A freelance services marketplace built with React, Express and MongoDB. Clients discover services and book freelancers; freelancers manage gigs, respond to requests and track completed-work income. Administrators can view platform statistics, registered users and service listings.
 
-Originally developed as a university group project. No real payments are processed.
 
 ## Preview
 
@@ -10,8 +9,8 @@ Originally developed as a university group project. No real payments are process
 
 **Workflow:** browse services → request a booking → freelancer accepts and completes the work → view completed-work income.
 
-<details>
-<summary>View the booking workflow and administrator dashboard</summary>
+<details open>
+<summary>Booking workflow and administrator dashboard - click to minimise</summary>
 
 ### 1. Browse freelance services
 
@@ -45,7 +44,7 @@ The administrator overview displays user, role, service and booking counts.
 
 </details>
 
-Screenshots show a local demonstration using test accounts and sample data. No real payments are processed.
+Screenshots show a local demonstration using test accounts and sample data.
 
 ## Features
 
@@ -57,6 +56,29 @@ Screenshots show a local demonstration using test accounts and sample data. No r
 - Administrator overview of users, services and platform activity.
 - Password hashing, input validation, rate limiting, account lockout and token revocation.
 - Responsive layouts, keyboard focus indicators and accessible navigation.
+
+## Security
+
+- Passwords hashed with bcrypt.
+- JWT authentication with token revocation on logout.
+- Role-based access for clients, freelancers and administrators.
+- Ownership checks prevent users from modifying another freelancer’s gigs or bookings.
+- Server-side validation and authoritative booking prices.
+- Rate limiting and temporary account lockout after repeated failed logins.
+- Structured logging with sensitive-value redaction.
+- Environment-based secrets excluded from version control.
+
+## Testing and quality assurance
+
+- **Backend unit tests:** authentication, authorisation, validation, booking rules, income reporting and tax calculations.
+- **MongoDB integration tests:** booking persistence, transaction rollback, ownership checks and competing status updates against a real local replica set.
+- **Frontend component tests:** forms, protected routes, dashboards, booking interactions and error handling.
+- **Playwright browser tests:** end-to-end workflows, responsive layouts and navigation.
+- **Postman/Newman collections:** API workflows, authentication and security scenarios.
+- **Manual testing:** client, freelancer and administrator workflows in a local environment.
+- **Static checks:** ESLint and frontend production builds.
+
+OWASP ZAP was used aswell for dynamic security scanning during the original university project.
 
 ## Technology
 
