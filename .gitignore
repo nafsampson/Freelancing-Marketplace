@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Environment and credentials
+.env
+.env.*
+!.env.example
+.local/
+*.key
+*.pem
+*.pfx
+*.p12
+
+# Logs and generated output
+logs/
+*.log
+npm-debug.log*
+dist/
+build/
+coverage/
+playwright-report/
+test-results/
+screenshots/capture-*/
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+Desktop.ini

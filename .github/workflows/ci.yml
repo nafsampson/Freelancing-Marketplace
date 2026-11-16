@@ -1,0 +1,459 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - Dev
+      - Dev-Merge
+      - "Thomas/**"
+      - "Connor/**"
+      - "Nafees/**"
+      - "Micheal/**"
+  pull_request:
+    branches:
+      - main
+      - Dev
+
+env:
+  NODE_VERSION: "22"
+
+jobs:
+  # ─────────────────────────────────────────────────────────
+  # Backend: Lint, Security Audit, Unit Tests, Admin Seeding, Newman E2E
+  # ─────────────────────────────────────────────────────────
+  backend:
+    name: Backend Tests & Integration
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+
+    defaults:
+      run:
+        working-directory: Backend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate throwaway CI credentials
+        run: |
+          for v in JWT_SECRET ADMIN_PASSWORD; do
+            val=$(openssl rand -hex 24); echo "::add-mask::$val"; echo "$v=$val" >> "$GITHUB_ENV"
+          done
+          echo "ADMIN_EMAIL=admin@hustlehub.test" >> "$GITHUB_ENV"
+          echo "MONGODB_URI=mongodb://127.0.0.1:27017/hustlehub_ci" >> "$GITHUB_ENV"
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: Backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: Security Audit (Production dependencies)
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Run Unit Tests with Coverage (lcov)
+        run: npm run test:coverage
+
+      - name: Generate TLS certificates for local HTTPS
+        run: |
+          mkdir -p certs
+          openssl req -x509 -newkey rsa:2048 -keyout certs/localhost-key.pem \
+            -out certs/localhost-cert.pem -days 1 -nodes \
+            -subj "/CN=localhost"
+
+      - name: Seed Admin Account
+        run: npm run seed:admin
+
+      - name: Start Backend HTTPS Server
+        env:
+          PORT: 4000
+          USE_HTTPS: "true"
+          SSL_KEY_PATH: ./certs/localhost-key.pem
+          SSL_CERT_PATH: ./certs/localhost-cert.pem
+          CLIENT_ORIGIN: http://localhost:5173
+          NODE_ENV: test
+        run: |
+          node index.js &
+
+      - name: Wait for API health check
+        run: |
+          echo "Polling Backend /health endpoint..."
+          for i in {1..30}; do
+            if curl -k -s https://localhost:4000/health | grep -q "OK"; then
+              echo "Backend API is up and healthy!"
+              exit 0
+            fi
+            echo "Waiting for server to become responsive ($i/30)..."
+            sleep 1
+          done
+          echo "Backend failed to become healthy within 30 seconds!"
+          exit 1
+
+      - name: Run Newman Postman Integration Tests
+        env:
+          API_BASE_URL: https://localhost:4000
+          ALLOW_SELF_SIGNED_LOCALHOST: 'true'
+        run: npm run test:postman
+
+      - name: Upload Backend Coverage Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: Backend/coverage/lcov.info
+
+  # ─────────────────────────────────────────────────────────
+  # Frontend: Lint, Security Audit, Component Tests, Coverage, Production Build
+  # ─────────────────────────────────────────────────────────
+  frontend:
+    name: Frontend Tests & Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: Security Audit (Production dependencies)
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Run Vitest with Coverage (v8)
+        run: npm run test:coverage
+
+      - name: Build for Production
+        run: npm run build
+
+      - name: Upload Frontend Coverage Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-coverage
+          path: frontend/coverage/lcov.info
+
+  # ─────────────────────────────────────────────────────────
+  # Frontend E2E: Playwright Integration Tests against Real Stack
+  # ─────────────────────────────────────────────────────────
+  e2e:
+    name: Playwright Integration Tests
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            Backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Generate throwaway CI credentials
+        run: |
+          for v in JWT_SECRET ADMIN_PASSWORD; do
+            val=$(openssl rand -hex 24); echo "::add-mask::$val"; echo "$v=$val" >> "$GITHUB_ENV"
+          done
+          echo "ADMIN_EMAIL=admin@hustlehub.test" >> "$GITHUB_ENV"
+          echo "MONGODB_URI=mongodb://127.0.0.1:27017/hustlehub_ci" >> "$GITHUB_ENV"
+
+      # MongoDB replica set required for booking transactions
+      - name: Start MongoDB replica set
+        run: |
+          docker run -d --name hustlehub-ci-mongo -p 27017:27017 mongo:7 --replSet rs0 --bind_ip_all
+
+          for i in {1..30}; do
+            if docker exec hustlehub-ci-mongo mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' | grep -qx '1'; then
+              break
+            fi
+            sleep 2
+          done
+
+          docker exec hustlehub-ci-mongo mongosh --quiet --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]})'
+
+          for i in {1..30}; do
+            if docker exec hustlehub-ci-mongo mongosh --quiet --eval 'db.hello().isWritablePrimary' | grep -qx 'true'; then
+              echo "MongoDB replica set is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "MongoDB replica set failed to start"
+          exit 1
+      - name: Generate TLS certificates for Backend HTTPS
+        run: |
+          mkdir -p Backend/certs
+          openssl req -x509 -newkey rsa:2048 -keyout Backend/certs/localhost-key.pem \
+            -out Backend/certs/localhost-cert.pem -days 1 -nodes \
+            -subj "/CN=localhost"
+
+      - name: Seed Admin Account
+        run: |
+          cd Backend
+          npm ci
+          npm run seed:admin
+
+      - name: Verify booking transactions against the replica set
+        working-directory: Backend
+        env:
+          BOOKING_TEST_MONGODB_URI: mongodb://127.0.0.1:27017/?replicaSet=rs0
+        run: npm run test:integration:bookings
+
+      - name: Start Backend HTTPS Server
+        run: |
+          cd Backend
+          PORT=4000 USE_HTTPS=true SSL_KEY_PATH=./certs/localhost-key.pem SSL_CERT_PATH=./certs/localhost-cert.pem CLIENT_ORIGIN=http://localhost:5173 node index.js &
+
+      - name: Wait for API health check
+        run: |
+          for i in {1..30}; do
+            if curl -k -s https://localhost:4000/health | grep -q "OK"; then
+              echo "Backend API is up and healthy!"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Backend failed to start!"
+          exit 1
+
+      - name: Install Frontend Dependencies & Playwright
+        run: |
+          cd frontend
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Build Frontend for Preview
+        run: |
+          cd frontend
+          VITE_API_URL=https://localhost:4000/api npm run build
+
+      - name: Start Frontend Preview Server
+        run: |
+          cd frontend
+          npm run preview -- --port 5173 &
+          sleep 3
+
+      - name: Run Playwright Tests
+        run: |
+          cd frontend
+          npm run test:e2e
+        env:
+          PLAYWRIGHT_BASE_URL: http://localhost:5173
+
+      # Test the complete booking workflow
+      - name: Run Newman Booking Workflow Tests
+        run: |
+          cd Backend
+          npx --no-install newman run "../PostmanCollectionTests/booking-workflow.postman_collection.json" --insecure
+
+      # Test JWT revocation and account lockout
+      - name: Run Newman Part 3 Security Tests
+        run: |
+          cd Backend
+          npx --no-install newman run "../PostmanCollectionTests/authentication-security.postman_collection.json" --insecure
+  # ─────────────────────────────────────────────────────────
+  # Static Code Analysis: SonarQube (self-hosted in the job via Docker)
+  # ─────────────────────────────────────────────────────────
+  sonar:
+    name: SonarQube Static Analysis
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    env:
+      SONAR_HOST_URL: http://localhost:9000
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download backend coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-coverage
+          path: Backend/coverage
+
+      - name: Download frontend coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-coverage
+          path: frontend/coverage
+
+      - name: Normalise lcov paths for SonarQube
+        run: |
+          # Make every SF: path relative to the repository root
+          sed -i "s#^SF:$GITHUB_WORKSPACE/#SF:#" Backend/coverage/lcov.info frontend/coverage/lcov.info
+          # Vitest writes paths relative to frontend/
+          sed -i 's#^SF:src/#SF:frontend/src/#' frontend/coverage/lcov.info
+          echo "--- backend lcov sample ---";  grep -m3 '^SF:' Backend/coverage/lcov.info || true
+          echo "--- frontend lcov sample ---"; grep -m3 '^SF:' frontend/coverage/lcov.info || true
+
+      - name: Start SonarQube server (Docker)
+        run: |
+          docker run -d --name sonarqube -p 9000:9000 \
+            -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true \
+            sonarqube:community
+          echo "Waiting for SonarQube to be ready..."
+          for i in {1..60}; do
+            status=$(curl -s http://localhost:9000/api/system/status | grep -o '"status":"[A-Z_]*"' || true)
+            echo "($i/60) $status"
+            echo "$status" | grep -q UP && exit 0
+            sleep 5
+          done
+          echo "SonarQube did not start"; docker logs sonarqube; exit 1
+
+      - name: Create analysis token
+        run: |
+          # Strong password: upper + lower + digit + special, 20+ chars (satisfies SonarQube policy)
+          NEW_PW="Aa1!$(openssl rand -hex 16)"
+          echo "::add-mask::$NEW_PW"
+
+          code=$(curl -s -o /tmp/pw.out -w "%{http_code}" -u admin:admin -X POST \
+            "http://localhost:9000/api/users/change_password" \
+            --data-urlencode "login=admin" \
+            --data-urlencode "previousPassword=admin" \
+            --data-urlencode "password=$NEW_PW")
+          echo "change_password HTTP $code"
+          if [ "$code" != "204" ]; then
+            echo "Password change failed:"; cat /tmp/pw.out; echo
+            docker logs sonarqube --tail 40
+            exit 1
+          fi
+
+          code=$(curl -s -o /tmp/token.json -w "%{http_code}" -u "admin:$NEW_PW" -X POST \
+            "http://localhost:9000/api/user_tokens/generate" \
+            --data-urlencode "name=ci-$GITHUB_RUN_ID")
+          echo "generate token HTTP $code"
+          if [ "$code" != "200" ]; then
+            echo "Token generation failed:"; cat /tmp/token.json; echo
+            exit 1
+          fi
+
+          TOKEN=$(sed -E 's/.*"token":"([^"]+)".*/\1/' /tmp/token.json)
+          echo "::add-mask::$TOKEN"
+          echo "SONAR_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          echo "SONAR_ADMIN_PW=$NEW_PW" >> "$GITHUB_ENV"
+
+      - name: Run SonarQube scan
+        uses: SonarSource/sonarqube-scan-action@v5
+        with:
+          args: -Dsonar.qualitygate.wait=true -Dsonar.qualitygate.timeout=300
+
+      - name: Export findings report
+        if: always()
+        run: |
+          curl -s -u "admin:$SONAR_ADMIN_PW" \
+            "http://localhost:9000/api/issues/search?componentKeys=hustlehub-plus&ps=500" > sonar-issues.json || true
+          curl -s -u "admin:$SONAR_ADMIN_PW" \
+            "http://localhost:9000/api/qualitygates/project_status?projectKey=hustlehub-plus" > sonar-quality-gate.json || true
+
+      - name: Upload SonarQube reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonarqube-report
+          path: |
+            sonar-issues.json
+            sonar-quality-gate.json
+
+  # ─────────────────────────────────────────────────────────
+  # Docker: Multi-container Compose Orchestration & Health Check
+  # ─────────────────────────────────────────────────────────
+  docker:
+    name: Docker Containerization & Health Check
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate TLS certificates for Docker volume mount
+        run: |
+          mkdir -p Backend/certs
+          openssl req -x509 -newkey rsa:2048 -keyout Backend/certs/localhost-key.pem \
+            -out Backend/certs/localhost-cert.pem -days 1 -nodes \
+            -subj "/CN=localhost"
+
+      - name: Prepare CI inputs
+        run: |
+          touch Backend/.env
+          echo "JWT_SECRET=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+
+      - name: Start the stack and wait for health checks
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --build --wait --wait-timeout 180
+
+      - name: Check both containers respond
+        run: |
+          docker compose ps
+          curl -fsSk https://localhost:4000/health | grep -q OK
+          curl -fsSk https://localhost:8443 | grep -qi '<div id="root"'
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Teardown Docker Stack
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v
+
+  # ─────────────────────────────────────────────────────────
+  # CI Gate: Unified Required Status Check
+  # ─────────────────────────────────────────────────────────
+  ci-gate:
+    name: CI Pipeline Gate
+    runs-on: ubuntu-latest
+    needs: [backend, frontend, e2e, sonar, docker]
+    if: always()
+
+    steps:
+      - name: Check Status of All Pipeline Stages
+        run: |
+          if [ "${{ needs.backend.result }}" != "success" ]; then
+            echo "❌ Backend tests failed!"
+            exit 1
+          fi
+          if [ "${{ needs.frontend.result }}" != "success" ]; then
+            echo "❌ Frontend tests failed!"
+            exit 1
+          fi
+          if [ "${{ needs.e2e.result }}" != "success" ]; then
+            echo "❌ E2E tests failed!"
+            exit 1
+          fi
+          if [ "${{ needs.sonar.result }}" != "success" ]; then
+            echo "❌ SonarQube quality gate failed!"
+            exit 1
+          fi
+          if [ "${{ needs.docker.result }}" != "success" ]; then
+            echo "❌ Docker verification failed!"
+            exit 1
+          fi
+          echo "✅ All CI/CD quality and security gates passed successfully!"
+          exit 0
