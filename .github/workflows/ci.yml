@@ -25,11 +25,6 @@ jobs:
   backend:
     name: Backend Tests & Integration
     runs-on: ubuntu-latest
-    services:
-      mongodb:
-        image: mongo:7
-        ports:
-          - 27017:27017
 
     defaults:
       run:
@@ -39,13 +34,49 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Start MongoDB replica set
+        run: |
+          docker run -d --name hustlehub-ci-mongo \
+            -p 127.0.0.1:27017:27017 \
+            mongo:7 --replSet rs0 --bind_ip_all
+
+          ready=false
+          for i in {1..30}; do
+            if docker exec hustlehub-ci-mongo mongosh --quiet \
+              --eval 'quit(db.adminCommand({ping:1}).ok === 1 ? 0 : 1)'; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$ready" != "true" ]; then
+            docker logs hustlehub-ci-mongo
+            exit 1
+          fi
+
+          docker exec hustlehub-ci-mongo mongosh --quiet \
+            --eval 'assert.commandWorked(rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]}))'
+
+          for i in {1..30}; do
+            if docker exec hustlehub-ci-mongo mongosh --quiet \
+              --eval 'quit(db.hello().isWritablePrimary === true ? 0 : 1)'; then
+              echo "MongoDB replica set is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          docker logs hustlehub-ci-mongo
+          exit 1
+
       - name: Generate throwaway CI credentials
         run: |
           for v in JWT_SECRET ADMIN_PASSWORD; do
             val=$(openssl rand -hex 24); echo "::add-mask::$val"; echo "$v=$val" >> "$GITHUB_ENV"
           done
           echo "ADMIN_EMAIL=admin@hustlehub.test" >> "$GITHUB_ENV"
-          echo "MONGODB_URI=mongodb://127.0.0.1:27017/hustlehub_ci" >> "$GITHUB_ENV"
+          echo "MONGODB_URI=mongodb://127.0.0.1:27017/hustlehub_ci?replicaSet=rs0" >> "$GITHUB_ENV"
 
       - name: Setup Node.js ${{ env.NODE_VERSION }}
         uses: actions/setup-node@v4
@@ -181,7 +212,7 @@ jobs:
             val=$(openssl rand -hex 24); echo "::add-mask::$val"; echo "$v=$val" >> "$GITHUB_ENV"
           done
           echo "ADMIN_EMAIL=admin@hustlehub.test" >> "$GITHUB_ENV"
-          echo "MONGODB_URI=mongodb://127.0.0.1:27017/hustlehub_ci" >> "$GITHUB_ENV"
+          echo "MONGODB_URI=mongodb://127.0.0.1:27017/hustlehub_ci?replicaSet=rs0" >> "$GITHUB_ENV"
 
       # MongoDB replica set required for booking transactions
       - name: Start MongoDB replica set
