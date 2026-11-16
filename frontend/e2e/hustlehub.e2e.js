@@ -163,9 +163,16 @@ test.describe('HustleHub+ End-to-End User Journey (Register -> Gig -> Book)', ()
 
     // 10. Completion survives refresh and is visible to the client.
     await switchAccount(clientEmail);
-    await expect(page.getByText('Completed', { exact: true })).toBeVisible();
+
+    const bookingStatus = page.locator('.booking-row .booking-status');
+
+    await expect(bookingStatus).toBeVisible();
+    await expect(bookingStatus).toHaveText('Completed');
+
     await page.reload();
-    await expect(page.getByText('Completed', { exact: true })).toBeVisible();
+
+    await expect(bookingStatus).toBeVisible();
+    await expect(bookingStatus).toHaveText('Completed');
     await capture(page, '07-client-completed.png', true);
 
     // 11. A second request can be rejected without increasing completed income.
